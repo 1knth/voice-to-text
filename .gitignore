@@ -1,0 +1,13 @@
+.build/
+dist/
+artifacts/
+.swiftpm/
+.DS_Store
+
+# Local-only configuration and internal planning/review documents
+AGENTS.md
+.pi/
+DEPENDENCY-REVIEW.md
+SYSTEM-DESIGN.md
+TECHNICAL-SPEC.md
+TEST-PLAN.md

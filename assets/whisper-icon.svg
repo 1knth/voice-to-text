@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Whisper app icon</title>
+  <desc>A white microphone with sound-wave accents on a rounded blue tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#62B5FF"/>
+      <stop offset="0.5" stop-color="#2878ED"/>
+      <stop offset="1" stop-color="#164AC4"/>
+    </linearGradient>
+    <linearGradient id="mic" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E0EDFF"/>
+    </linearGradient>
+    <filter id="shadow" x="-40%" y="-30%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#123A91" flood-opacity="0.24"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+  <rect x="17" y="17" width="478" height="478" rx="107" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+  <g filter="url(#shadow)">
+    <rect x="215" y="126" width="82" height="170" rx="41" fill="url(#mic)"/>
+    <g fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M184 258v16a72 72 0 0 0 144 0v-16"/>
+      <path d="M256 347v39M221 386h70"/>
+    </g>
+  </g>
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round">
+    <path d="M154 208v43M358 208v43" stroke-width="14" stroke-opacity="0.9"/>
+    <path d="M122 219v21M390 219v21" stroke-width="12" stroke-opacity="0.65"/>
+  </g>
+</svg>
