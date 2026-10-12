@@ -1,6 +1,6 @@
 # Whisper
 
-A small, early macOS menu-bar dictation app written in Swift. It captures speech while I hold a keyboard shortcut, transcribes it locally with `whisper-cli`, and copies the result or attempts to paste it into the focused app. It is a personal prototype, not a finished or broadly tested product.
+A small, early macOS menu-bar dictation app written in Swift. It captures speech through a configurable keyboard shortcut, transcribes it locally with `whisper-cli`, and copies the result or attempts to paste it into the focused app. It is a personal prototype, not a finished or broadly tested app.
 
 ## Run it locally
 
@@ -36,4 +36,4 @@ I've only used this on my own Mac. On this machine, I verified the arm64 build w
 
 ## Project status
 
-This is an early prototype. It has no installer, notarization, or bundled inference engine/model. Do not use automatic delivery in sensitive destinations without testing it yourself. See the source and tests for implementation details.
+This is an early prototype. Do not use automatic delivery in sensitive destinations without testing it yourself. See the source and tests for implementation details.
