@@ -12,4 +12,10 @@ int32_t whisper_capture_begin_write(WhisperCaptureRing *ring);
 void whisper_capture_commit_write(WhisperCaptureRing *ring);
 int32_t whisper_capture_begin_read(WhisperCaptureRing *ring);
 void whisper_capture_commit_read(WhisperCaptureRing *ring);
+// Lock-free latest-value mailbox for scalar UI telemetry from the audio producer.
+int whisper_level_is_lock_free(void);
+void whisper_level_store(float level);
+float whisper_level_load(void);
+// Frame-rate-independent asymmetric response, with long pauses capped at 50 ms.
+double whisper_level_step(double current, double target, double delta);
 #endif

@@ -49,6 +49,9 @@ final class NativeRecorder {
 
     private func prepare(url: URL, format: AVAudioFormat, durationLimit: TimeInterval) throws {
         guard ring == nil else { throw AppFailure("Recorder already used.") }
+        guard whisper_level_is_lock_free() != 0 else {
+            throw AppFailure("Lock-free microphone level updates are unavailable on this system.")
+        }
         guard format.sampleRate > 0, format.sampleRate <= 192000,
               format.channelCount > 0, format.channelCount <= 8,
               format.commonFormat == .pcmFormatFloat32, !format.isInterleaved,
@@ -102,10 +105,16 @@ final class NativeRecorder {
             }
             let count = min(Int(slot.frameCapacity), frames - offset)
             slot.frameLength = AVAudioFrameCount(count)
+            var peak: Float = 0
             for channel in 0..<Int(buffer.format.channelCount) {
-                memcpy(dst[channel], src[channel].advanced(by: offset), count * MemoryLayout<Float>.size)
+                let source = src[channel].advanced(by: offset)
+                memcpy(dst[channel], source, count * MemoryLayout<Float>.size)
+                // Sample a bounded subset while copying; never scan the whole tap buffer twice.
+                stride(from: 0, to: count, by: 16).forEach { peak = max(peak, abs(source[$0])) }
             }
             whisper_capture_commit_write(ring)
+            // Single atomic overwrite: audio callbacks never enqueue UI work.
+            whisper_level_store(min(1, peak * 5))
             capturedFrames += count; offset += count
         }
         if !reportedReady {

@@ -2,6 +2,30 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <math.h>
+
+static _Atomic(uint32_t) latest_level_bits;
+
+int whisper_level_is_lock_free(void) {
+    return atomic_is_lock_free(&latest_level_bits);
+}
+
+void whisper_level_store(float level) {
+    union { float value; uint32_t bits; } encoded = { .value = level };
+    atomic_store_explicit(&latest_level_bits, encoded.bits, memory_order_relaxed);
+}
+
+float whisper_level_load(void) {
+    union { float value; uint32_t bits; } encoded = { .bits = atomic_load_explicit(&latest_level_bits, memory_order_relaxed) };
+    return encoded.value;
+}
+
+double whisper_level_step(double current, double target, double delta) {
+    if (delta < 0) delta = 0;
+    if (delta > 0.05) delta = 0.05;
+    const double time_constant = target > current ? 0.055 : 0.14;
+    return current + (target - current) * (1.0 - exp(-delta / time_constant));
+}
 
 struct WhisperCaptureRing {
     uint32_t capacity;

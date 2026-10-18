@@ -23,6 +23,29 @@ final class CaptureRingTests: XCTestCase {
         }
         XCTAssertEqual(whisper_capture_begin_read(ring), -1)
     }
+    func testLatestLevelMailboxOverwritesWithoutQueueing() {
+        XCTAssertNotEqual(whisper_level_is_lock_free(), 0)
+        for value in 0..<100_000 {
+            whisper_level_store(Float(value) / 100_000)
+        }
+        XCTAssertEqual(whisper_level_load(), 0.99999, accuracy: 0.000001)
+    }
+    func testLevelResponseAttackReleaseAndDeltaConsistency() {
+        func response(_ intervals: [Double], initial: Double = 0, target: Double) -> Double {
+            intervals.reduce(initial) { whisper_level_step($0, target, $1) }
+        }
+
+        let attack = response(Array(repeating: 1.0 / 60, count: 6), target: 1)
+        let release = response(Array(repeating: 1.0 / 60, count: 6), initial: 1, target: 0)
+        XCTAssertEqual(attack, 0.838, accuracy: 0.002) // 100 ms: 84% of target
+        XCTAssertEqual(release, 0.490, accuracy: 0.002) // 100 ms: 49% remains
+
+        let regular = response(Array(repeating: 1.0 / 60, count: 60), target: 1)
+        let irregular = response([0.007, 0.031, 0.012, 0.05, 0.019, 0.05, 0.043] + Array(repeating: 0.05, count: 15) + [0.038], target: 1)
+        XCTAssertEqual(regular, 1 - exp(-1.0 / 0.055), accuracy: 0.000001)
+        XCTAssertEqual(irregular, 1 - exp(-1.0 / 0.055), accuracy: 0.000001)
+        XCTAssertEqual(whisper_level_step(0, 1, 1), whisper_level_step(0, 1, 0.05), accuracy: 0.000001)
+    }
     func testInvalidCapacity() {
         XCTAssertNil(whisper_capture_create(0))
         XCTAssertNil(whisper_capture_create(3))
