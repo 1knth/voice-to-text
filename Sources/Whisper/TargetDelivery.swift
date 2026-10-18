@@ -103,6 +103,9 @@ final class TargetDelivery {
         guard paste else {
             if !config.automaticPaste { return "Transcript copied — paste manually into your intended input." }
             if changed || target?.matchesCurrent() != true { return "Focus changed or could not be verified — transcript copied." }
+            if target?.terminal == true && !config.terminalBestEffort {
+                return "Terminal paste is disabled — enable Allow terminal paste in Settings. Transcript copied."
+            }
             if target?.editable != true && target?.terminal != true { return "No editable input detected — transcript copied. Focus an editor and try again." }
             return "Automatic paste unavailable — transcript copied."
         }
