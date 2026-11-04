@@ -1,5 +1,12 @@
 import Foundation
 
+/// Serializes blocking recorder lifecycle work so stop cannot overtake setup.
+public final class SerialLifecycleQueue {
+    private let queue: DispatchQueue
+    public init(label: String) { queue = DispatchQueue(label: label, qos: .userInitiated) }
+    public func submit(_ operation: @escaping () -> Void) { queue.async(execute: operation) }
+}
+
 public enum Phase: String {
     case idle, starting, recording, stopping, transcribing, delivering
     public var label: String {
@@ -68,8 +75,10 @@ public enum Transcript {
 
 public struct DeliveryPolicy {
     public static func mayPaste(automatic: Bool, changed: Bool, sameTarget: Bool,
-                                editable: Bool, terminal: Bool, bestEffort: Bool) -> Bool {
-        guard automatic, !changed, sameTarget else { return false }
+                                editable: Bool, terminal: Bool, bestEffort: Bool, global: Bool = false) -> Bool {
+        guard automatic else { return false }
+        if global { return true }
+        guard !changed, sameTarget else { return false }
         return terminal ? bestEffort : editable
     }
 }

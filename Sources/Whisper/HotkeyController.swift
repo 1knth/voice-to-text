@@ -1,9 +1,10 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import WhisperCore
 
 final class HotkeyController {
-    var onPress: (() -> Void)?
+    var onPress: ((DictationAction) -> Void)?
     var onRelease: (() -> Void)?
     var onCancel: (() -> Void)?
     var keyCode: UInt16 = 2
@@ -12,6 +13,8 @@ final class HotkeyController {
     private var source: CFRunLoopSource?
     private var held = false
     private var swallowed = false
+    private var activeKeyCode: UInt16 = 2
+    private var activeModifiers: CGEventFlags = []
     private static let relevant: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
 
     var secureInputEnabled: Bool { IsSecureEventInputEnabled() }
@@ -51,7 +54,7 @@ final class HotkeyController {
             return Unmanaged.passUnretained(event)
         }
         let code = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        if type == .keyUp && code == keyCode && swallowed {
+        if type == .keyUp && code == activeKeyCode && swallowed {
             swallowed = false
             if held { held = false; DispatchQueue.main.async { [weak self] in self?.onRelease?() } }
             return nil
@@ -61,16 +64,19 @@ final class HotkeyController {
             DispatchQueue.main.async { [weak self] in self?.onCancel?() }
             return nil
         }
-        if held && type == .flagsChanged && event.flags.intersection(Self.relevant) != modifiers {
+        if held && type == .flagsChanged && event.flags.intersection(Self.relevant) != activeModifiers {
             held = false
             DispatchQueue.main.async { [weak self] in self?.onRelease?() }
         }
-        if type == .keyDown && code == keyCode {
-            if swallowed { return nil }
-            if event.flags.intersection(Self.relevant) == modifiers {
+        if type == .keyDown {
+            if swallowed && code == activeKeyCode { return nil }
+            let pressedModifiers = event.flags.intersection(Self.relevant)
+            let delivery = Shortcut.fixedAction(key: code, modifiers: pressedModifiers.rawValue)
+            if delivery != nil || (code == keyCode && pressedModifiers == modifiers) {
                 if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                     held = true; swallowed = true
-                    DispatchQueue.main.async { [weak self] in self?.onPress?() }
+                    activeKeyCode = code; activeModifiers = pressedModifiers
+                    DispatchQueue.main.async { [weak self] in self?.onPress?(delivery ?? .configured) }
                 }
                 return nil
             }

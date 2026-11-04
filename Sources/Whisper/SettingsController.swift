@@ -189,15 +189,15 @@ private struct SettingsView: View {
                 }
             } footer: { Text("Hold to speak. Release to finish.") }
             Section("Delivery") {
-                Picker("Transcript", selection: store.binding(\.automaticPaste)) {
+                Text("⌥D sends Cmd+V to the focused app. ⌥⇧D copies to the clipboard.")
+                    .font(.callout)
+                Picker("Other shortcuts", selection: store.binding(\.automaticPaste)) {
                     Text("Copy to clipboard").tag(false)
                     Text("Paste automatically").tag(true)
                 }
                 Toggle("Restore previous clipboard", isOn: store.binding(\.preserveClipboard))
-                    .disabled(!store.configuration.automaticPaste)
                     .help("Best-effort plain-text restoration. Copy Last Transcript remains available.")
                 Toggle("Allow terminal paste", isOn: store.binding(\.terminalBestEffort))
-                    .disabled(!store.configuration.automaticPaste)
                     .help("Terminal tabs and tmux panes cannot be verified. Leave off for strict copy-only behavior.")
             }
             Section("Appearance") {
