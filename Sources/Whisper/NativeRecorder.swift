@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import WhisperCapture
+import WhisperCore
 
 struct AppFailure: LocalizedError {
     let message: String
@@ -12,6 +13,7 @@ struct AppFailure: LocalizedError {
 final class NativeRecorder {
     private let engine = AVAudioEngine()
     private let worker = DispatchQueue(label: "Whisper.audio-writer", qos: .userInitiated)
+    private let lifecycle = SerialLifecycleQueue(label: "Whisper.audio-lifecycle")
     private var slots: [AVAudioPCMBuffer] = []
     private var ring: OpaquePointer?
     private var timer: DispatchSourceTimer?
@@ -31,6 +33,27 @@ final class NativeRecorder {
     var onLimit: (() -> Void)?
 
     deinit { if let ring { whisper_capture_destroy(ring) } }
+
+    /// Run blocking engine setup away from the main thread and serialize stop behind it.
+    func startAsync(url: URL, durationLimit: TimeInterval, completion: @escaping (Error?) -> Void) {
+        lifecycle.submit { [weak self] in
+            guard let self else { return }
+            let result: Result<Void, Error>
+            do { try self.start(url: url, durationLimit: durationLimit); result = .success(()) }
+            catch { result = .failure(error) }
+            DispatchQueue.main.async {
+                if case .failure(let error) = result { completion(error) }
+                else { completion(nil) }
+            }
+        }
+    }
+
+    func stopAsync(completion: @escaping (Error?) -> Void) {
+        lifecycle.submit { [weak self] in
+            let error = self?.stop()
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
 
     func start(url: URL, durationLimit: TimeInterval) throws {
         let node = engine.inputNode
