@@ -34,7 +34,8 @@ final class NativeRecorder {
 
     deinit { if let ring { whisper_capture_destroy(ring) } }
 
-    /// Run blocking engine setup away from the main thread and serialize stop behind it.
+    /// Serialize blocking engine setup away from the main thread. Stop requests use
+    /// the same queue, so a release during setup cannot race engine startup.
     func startAsync(url: URL, durationLimit: TimeInterval, completion: @escaping (Error?) -> Void) {
         lifecycle.submit { [weak self] in
             guard let self else { return }
@@ -137,7 +138,8 @@ final class NativeRecorder {
             }
             whisper_capture_commit_write(ring)
             // Single atomic overwrite: audio callbacks never enqueue UI work.
-            whisper_level_store(min(1, peak * 5))
+            // Boost only the HUD meter; captured samples and recording gain stay unchanged.
+            whisper_level_store(min(1, peak * 8))
             capturedFrames += count; offset += count
         }
         if !reportedReady {
