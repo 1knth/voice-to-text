@@ -17,7 +17,7 @@ final class RecordingHUD {
     private let material = NSVisualEffectView()
     private let waveform = TransparentHUDCanvas(frame: NSRect(x: 0, y: 0, width: 152, height: 44))
     private let ring = NSProgressIndicator()
-    private let bars = (0..<7).map { _ in CAShapeLayer() }
+    private let bars = (0..<7).map { _ in CALayer() }
     private var screenID: CGDirectDisplayID?
     private var visibility = HUDVisibility()
     private var level: CGFloat = 0
@@ -60,8 +60,8 @@ final class RecordingHUD {
         material.addSubview(ring)
 
         for (index, bar) in bars.enumerated() {
-            bar.fillColor = NSColor.labelColor.cgColor
-            bar.cornerRadius = 2
+            bar.backgroundColor = NSColor.labelColor.cgColor
+            bar.cornerRadius = 2.5
             // Keep waveform above NSVisualEffectView's compositor-managed surface;
             // sublayers attached to that view can be obscured by its backdrop rendering.
             waveform.layer?.addSublayer(bar)
@@ -102,24 +102,25 @@ final class RecordingHUD {
         CATransaction.commit()
     }
 
-    private func setBar(_ bar: CAShapeLayer, index: Int, level: CGFloat) {
+    private func setBar(_ bar: CALayer, index: Int, level: CGFloat) {
         // A fixed center-weighted silhouette keeps the center tallest at every
         // input level; the same restrained amplitude change moves all bars in sync.
         let envelope: CGFloat = [0.42, 0.68, 0.86, 1, 0.86, 0.68, 0.42][index]
-        let halfHeight = envelope * (CGFloat(2) + min(level, 0.55) * 8)
-        let x = CGFloat(49 + index * 8)
-        // One capsule is mirrored around the centerline, so both lobes always
-        // represent the same live microphone amplitude.
-        let frame = CGRect(x: x + 1, y: Self.height / 2 - halfHeight, width: 4, height: halfHeight * 2)
+        let halfHeight = envelope * (CGFloat(3) + min(level, 0.55) * 14)
+        let x = CGFloat(44 + index * 10)
+        // Rounded layer bounds avoid rebuilding a CGPath on every display tick.
+        let frame = CGRect(x: x, y: Self.height / 2 - halfHeight, width: 5, height: halfHeight * 2)
         bar.frame = frame
-        bar.path = CGPath(roundedRect: CGRect(origin: .zero, size: frame.size),
-                          cornerWidth: 2, cornerHeight: 2, transform: nil)
+        bar.cornerRadius = 2.5
     }
 
     func show(_ phase: Phase, enabled: Bool) {
         guard enabled, phase != .idle else { hide(); return }
         position(); configure(phase)
-        setCompact(phase == .stopping || phase == .transcribing || phase == .delivering)
+        // Reopen in the full HUD geometry before fading in. Otherwise the previous
+        // compact state animates from a circle while the panel is already visible.
+        setCompact(phase == .stopping || phase == .transcribing || phase == .delivering,
+                   animated: panel.isVisible)
         if phase == .recording { startDisplayUpdates() } else { stopDisplayUpdates() }
         if let generation = visibility.request(visible: true) {
             if !panel.isVisible { panel.alphaValue = 0 }
@@ -133,7 +134,7 @@ final class RecordingHUD {
         material.layer?.backgroundColor = workspace.accessibilityDisplayShouldReduceTransparency
             ? NSColor.windowBackgroundColor.cgColor : NSColor.clear.cgColor
         material.state = workspace.accessibilityDisplayShouldReduceTransparency ? .inactive : .active
-        bars.forEach { $0.isHidden = phase == .idle || phase == .starting }
+        bars.forEach { $0.isHidden = phase == .idle }
         if phase == .recording { displayedLevel = level }
         let shouldAnimateSpinner = phase == .transcribing
             && !workspace.accessibilityDisplayShouldReduceMotion
@@ -144,10 +145,10 @@ final class RecordingHUD {
         }
     }
 
-    private func setCompact(_ value: Bool) {
+    private func setCompact(_ value: Bool, animated: Bool = true) {
         guard compact != value else { return }
         compact = value
-        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.25
+        let duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.25 : 0
         let width = value ? Self.height : Self.width
         let origin = panel.frame.origin
         let frame = NSRect(x: origin.x + (panel.frame.width - width) / 2, y: origin.y,
@@ -238,11 +239,11 @@ final class RecordingHUD {
         guard barFrames.count == 7,
               barFrames.allSatisfy({ !$0.isEmpty && $0.minX >= 0 && $0.maxX <= Self.width
                   && $0.minY >= 0 && $0.maxY <= Self.height }),
-              widths.allSatisfy({ $0 == 4 }), gaps.allSatisfy({ $0 == 4 }), centered,
+              widths.allSatisfy({ $0 == 5 }), gaps.allSatisfy({ $0 == 5 }), centered,
               centerDominates, sameLayout,
               quietFrames[3].height < moderateFrames[3].height,
               moderateFrames[3].height < loudFrames[3].height,
-              loudFrames[3].height <= 13 else {
+              loudFrames[3].height <= 22 else {
             throw AppFailure("HUD waveform geometry, hierarchy, or level bounds are invalid.")
         }
         material.state = .inactive

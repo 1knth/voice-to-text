@@ -23,7 +23,7 @@ float whisper_level_load(void) {
 double whisper_level_step(double current, double target, double delta) {
     if (delta < 0) delta = 0;
     if (delta > 0.05) delta = 0.05;
-    const double time_constant = target > current ? 0.055 : 0.14;
+    const double time_constant = target > current ? 0.015 : 0.14;
     return current + (target - current) * (1.0 - exp(-delta / time_constant));
 }
 
