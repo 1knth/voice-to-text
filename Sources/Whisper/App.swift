@@ -4,10 +4,44 @@ import ApplicationServices
 import Darwin
 import WhisperCore
 
+private enum StartupDiagnostics {
+    static let enabled = ProcessInfo.processInfo.environment["WHISPER_STARTUP_DIAGNOSTICS"] == "1"
+    static let processEntry = DispatchTime.now().uptimeNanoseconds
+
+    static func log(_ message: String) {
+        guard enabled else { return }
+        let line = "Whisper timing: \(message)\\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    static func launchReady() {
+        let elapsed = milliseconds(since: processEntry)
+        log(String(format: "process-entry-to-launch-ready %.1f ms", elapsed))
+    }
+
+    static func milliseconds(since start: UInt64) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+    }
+}
+
+private struct StartupMeasurement {
+    private let began = DispatchTime.now().uptimeNanoseconds
+    private var previous = DispatchTime.now().uptimeNanoseconds
+
+    mutating func mark(_ stage: String) {
+        guard StartupDiagnostics.enabled else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let delta = Double(now - previous) / 1_000_000
+        let total = Double(now - began) / 1_000_000
+        StartupDiagnostics.log(String(format: "keybind %@ +%.1f ms, %.1f ms since delivery", stage, delta, total))
+        previous = now
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let statusLine = NSMenuItem(title: "Ready", action: nil, keyEquivalent: "")
-    private let resultLine = NSMenuItem(title: "Copy-only prototype", action: nil, keyEquivalent: "")
+    private let resultLine = NSMenuItem(title: "⌥D: paste · ⌥⇧D: copy", action: nil, keyEquivalent: "")
     private var cancelItem: NSMenuItem!, copyItem: NSMenuItem!
     private let hotkey = HotkeyController()
     private let hud = RecordingHUD()
@@ -17,11 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var jobConfig = Configuration()
     private var gate = JobGate()
     private var recorder: NativeRecorder?
+    private var recorderStopping = false
     private var transcriber: Transcriber?
     private var directory: URL?
     private var jobFiles: JobFiles?
     private var target: TargetSnapshot?
     private var targetChanged = false
+    private var jobAction = DictationAction.configured
+    private var monitorsFocus: Bool { jobConfig.automaticPaste && jobAction != .paste }
     private var maxTimer: Timer?, focusTimer: Timer?, startupTimer: Timer?
     private var lastTranscript: String?
     private var observers: [NSObjectProtocol] = []
@@ -30,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lockFD: Int32 = -1
     private var shortcutRecording = false
     private var shortcutRetryTimer: Timer?
+    private var startupMeasurement: StartupMeasurement?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -63,13 +101,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 config.keyCode = Shortcut.defaultKey; config.modifiers = Shortcut.defaultModifiers
             }
             UserDefaults.standard.set(1, forKey: "shortcutDefaultsVersion")
-            UserDefaults.standard.set(try? JSONEncoder().encode(config), forKey: "configuration")
             UserDefaults.standard.removeObject(forKey: "shortcutLabel")
         }
         UserDefaults.standard.set(try? JSONEncoder().encode(config), forKey: "configuration")
         TargetSnapshot.prepareAccessibility()
         buildMenu(); bindShortcut()
-        hotkey.onPress = { [weak self] in self?.start() }
+        hotkey.onPress = { [weak self] action in self?.start(action: action) }
         hotkey.onRelease = { [weak self] in self?.stop() }
         hotkey.onCancel = { [weak self] in self?.cancel() }
         settings.onSave = { [weak self] config in
@@ -112,11 +149,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 TargetSnapshot.prepareAccessibility()
                 guard self.gate.phase != .idle else { return }
-                if self.target?.matchesCurrent() != true { self.targetChanged = true }
+                if self.monitorsFocus && !self.targetChanged && self.target?.matchesCurrent() != true { self.targetChanged = true }
             })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in self?.hud.position() })
         if !AXIsProcessTrusted() { feedback("Enable the dictation shortcut in Settings.") }
+        StartupDiagnostics.launchReady()
     }
 
     private func buildMenu() {
@@ -168,11 +206,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return timer
     }
 
-    private func start() {
+    private func start(action: DictationAction) {
         guard !quitting, NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               let job = gate.begin() else { return }
-        cancelling = false; jobConfig = config; target = TargetSnapshot.capture(); targetChanged = false
-        hud.begin(on: target?.screen); refresh()
+        startupMeasurement = StartupMeasurement()
+        startupMeasurement?.mark("hotkey-delivered")
+        cancelling = false; jobConfig = config
+        jobAction = action
+        switch action {
+        case .paste: jobConfig.automaticPaste = true
+        case .copy: jobConfig.automaticPaste = false
+        case .configured: break
+        }
+        targetChanged = false
+        let targetApplication = NSWorkspace.shared.frontmostApplication
+        hud.begin(on: nil); refresh()
+        startupMeasurement?.mark("hud-requested")
+        // Accessibility queries can take hundreds of milliseconds. Keep them off
+        // AppKit's run loop so the opening HUD animation can be presented promptly.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let snapshot = TargetSnapshot.capture(frontmostApplication: targetApplication)
+            DispatchQueue.main.async {
+                guard let self, self.gate.owns(job),
+                      [.starting, .recording, .stopping].contains(self.gate.phase) else { return }
+                self.target = snapshot
+                self.hud.begin(on: snapshot?.screen)
+            }
+        }
         let permission = AVCaptureDevice.authorizationStatus(for: .audio)
         if permission == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
@@ -185,6 +245,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard permission == .authorized else { finish(message: "Microphone access denied. Open Permission Help."); return }
+        // Return to AppKit's run loop before allocating the capture pool and opening
+        // the audio engine. This lets the starting HUD paint before setup work.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.gate.owns(job), self.gate.phase == .starting else { return }
+            self.startRecorder(for: job)
+        }
+    }
+
+    private func startRecorder(for job: UUID) {
+        guard gate.owns(job), gate.phase == .starting else { return }
         do {
             guard let jobFiles else { throw AppFailure("Private temporary storage unavailable.") }
             let dir = try jobFiles.create()
@@ -192,6 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let recorder = NativeRecorder(); self.recorder = recorder
             recorder.onReady = { [weak self] in
                 guard let self, self.gate.advance(job, to: .recording) else { return }
+                self.startupMeasurement?.mark("first-audio-callback")
                 self.startupTimer?.invalidate(); self.startupTimer = nil; self.refresh()
             }
             recorder.onFailure = { [weak self] error in
@@ -202,26 +273,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.gate.owns(job) else { return }
                 self.stop()
             }
-            try recorder.start(url: dir.appendingPathComponent("recording.wav"), durationLimit: jobConfig.recordingLimit)
+            startupMeasurement?.mark("recorder-setup-begin")
+            recorder.startAsync(url: dir.appendingPathComponent("recording.wav"), durationLimit: jobConfig.recordingLimit) { [weak self] error in
+                guard let self, self.gate.owns(job) else { return }
+                if let error { self.cancel(message: error.localizedDescription); return }
+                guard self.gate.phase == .starting else { return }
+                self.startupMeasurement?.mark("engine-start-returned")
+            }
             maxTimer = commonTimer(interval: jobConfig.recordingLimit, repeats: false) { [weak self] _ in self?.stop() }
             startupTimer = commonTimer(interval: 5, repeats: false) { [weak self] _ in
                 guard let self, self.gate.owns(job), self.gate.phase == .starting else { return }
                 self.cancel(message: "Microphone produced no audio. Check the selected system input.")
             }
-            focusTimer = commonTimer(interval: 0.1, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                if self.target?.matchesCurrent() != true { self.targetChanged = true }
+            if monitorsFocus {
+                focusTimer = commonTimer(interval: 0.1, repeats: true) { [weak self] timer in
+                    guard let self else { timer.invalidate(); return }
+                    if self.target?.matchesCurrent() != true {
+                        self.targetChanged = true
+                        timer.invalidate()
+                    }
+                }
             }
         } catch { cancel(message: error.localizedDescription) }
     }
 
     private func stop() {
         guard let job = gate.id, [.starting, .recording].contains(gate.phase) else { return }
-        guard recorder != nil else { finish(message: "Recording cancelled before microphone readiness."); return }
+        guard let recorder else { finish(message: "Recording cancelled before microphone readiness."); return }
         guard gate.advance(job, to: .stopping) else { return }
         maxTimer?.invalidate(); startupTimer?.invalidate(); refresh()
-        let error = recorder?.stop(); recorder = nil
-        if let error { finish(message: error.localizedDescription); return }
+        guard !recorderStopping else { return }
+        recorderStopping = true
+        recorder.stopAsync { [weak self, weak recorder] error in
+            guard let self, self.gate.owns(job) else { return }
+            self.recorderStopping = false
+            if self.recorder === recorder { self.recorder = nil }
+            if let error { self.finish(message: error.localizedDescription); return }
+            if self.cancelling { self.finish(message: "Cancelled."); return }
+            self.transcribeStoppedRecording(job: job)
+        }
+    }
+
+    private func transcribeStoppedRecording(job: UUID) {
         guard let dir = directory else { finish(message: "Audio directory missing."); return }
         let audio = dir.appendingPathComponent("recording.wav")
         guard let file = try? AVAudioFile(forReading: audio), file.length > 0 else {
@@ -250,7 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func deliverWhenModifiersReleased(_ text: String, job: UUID, attempts: Int) {
         guard gate.owns(job), !cancelling else { return }
         let held = CGEventSource.flagsState(.combinedSessionState).intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
-        if !held.isEmpty && attempts > 0 {
+        if jobConfig.automaticPaste && !held.isEmpty && attempts > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.deliverWhenModifiersReleased(text, job: job, attempts: attempts - 1)
             }
@@ -258,29 +351,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         var settings = jobConfig
         if !held.isEmpty { settings.automaticPaste = false }
-        // Final job/target check and synchronous dispatch; cancellation cannot undo a posted paste.
-        let message = delivery.deliver(text, config: settings, target: target, changed: targetChanged)
+        let message = delivery.deliver(text, config: settings, target: target, changed: targetChanged, globalPaste: jobAction == .paste)
         finish(message: message)
     }
 
     private func cancel(message: String = "Cancelled.") {
         guard gate.id != nil else { return }
         cancelling = true; maxTimer?.invalidate(); startupTimer?.invalidate(); hud.hide()
-        _ = recorder?.stop(); recorder = nil
         if let transcriber, transcriber.isRunning {
             feedback(message); transcriber.cancel() // Wait for exit before cleanup/new job.
+        } else if let recorder = self.recorder, !recorderStopping {
+            recorderStopping = true
+            recorder.stopAsync { [weak self] _ in
+                guard let self else { return }
+                self.recorderStopping = false; self.recorder = nil
+                self.finish(message: message)
+            }
+        } else if recorderStopping {
+            feedback(message) // The queued stop callback owns cleanup.
         } else { finish(message: message) }
     }
     private func finish(message: String) {
         maxTimer?.invalidate(); focusTimer?.invalidate(); startupTimer?.invalidate()
         maxTimer = nil; focusTimer = nil; startupTimer = nil
-        _ = recorder?.stop(); recorder = nil
+        // Recorder stop completion owns this point; never delete its audio while
+        // engine setup or the writer queue may still be using the job directory.
+        self.recorder = nil
         var result = message
         if let directory {
             do { try jobFiles?.remove(directory) }
             catch { result = "Temporary audio cleanup failed. Check \(jobFiles?.root.path ?? "the macOS temporary folder")." }
         }
-        directory = nil; transcriber = nil; gate.finish(); target = nil; cancelling = false
+        directory = nil; transcriber = nil; recorderStopping = false; gate.finish(); target = nil; cancelling = false
         feedback(result); refresh()
         if quitting { NSApp.reply(toApplicationShouldTerminate: true) }
     }
@@ -340,6 +442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct WhisperMain {
     static func main() {
+        _ = StartupDiagnostics.processEntry
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
         if CommandLine.arguments.contains("--permissions-status") {

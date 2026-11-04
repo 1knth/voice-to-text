@@ -18,6 +18,29 @@ final class DictationTests: XCTestCase {
         XCTAssertFalse(gate.advance(old, to: .recording))
         XCTAssertFalse(gate.owns(old)); XCTAssertTrue(gate.owns(new))
     }
+    func testRecorderLifecycleStopWaitsForQueuedSetupBeforeCleanup() {
+        let lifecycle = SerialLifecycleQueue(label: "test.recorder.lifecycle")
+        let setupEntered = expectation(description: "setup entered")
+        let stopFinished = expectation(description: "stop finished")
+        let allowSetup = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var events: [String] = []
+        lifecycle.submit {
+            setupEntered.fulfill()
+            allowSetup.wait()
+            lock.lock(); events.append("setup-finished"); lock.unlock()
+        }
+        wait(for: [setupEntered], timeout: 2)
+        lifecycle.submit {
+            lock.lock(); events.append("stop-cleanup"); lock.unlock()
+            stopFinished.fulfill()
+        }
+        allowSetup.signal()
+        wait(for: [stopFinished], timeout: 2)
+        lock.lock(); let result = events; lock.unlock()
+        XCTAssertEqual(result, ["setup-finished", "stop-cleanup"])
+    }
+
     func testQuickReleaseCanStopStartup() {
         var gate = JobGate(); let job = gate.begin()!
         XCTAssertTrue(gate.advance(job, to: .stopping))
@@ -43,6 +66,12 @@ final class DictationTests: XCTestCase {
         XCTAssertFalse(Shortcut.isValid(key: 53, modifiers: 0x100000))
         XCTAssertFalse(Shortcut.isValid(key: 200, modifiers: 0x80000))
     }
+    func testFixedDeliveryShortcuts() {
+        XCTAssertEqual(Shortcut.fixedAction(key: 2, modifiers: 0x80000), .paste)
+        XCTAssertEqual(Shortcut.fixedAction(key: 2, modifiers: 0xA0000), .copy)
+        XCTAssertNil(Shortcut.fixedAction(key: 2, modifiers: 0x180000))
+        XCTAssertNil(Shortcut.fixedAction(key: 5, modifiers: 0x80000))
+    }
     func testShortcutConfigurationRoundTrip() throws {
         var config = Configuration(); config.keyCode = 5; config.modifiers = 0x120000
         let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
@@ -53,6 +82,14 @@ final class DictationTests: XCTestCase {
         XCTAssertEqual(Transcript.normalize(" hello\n world\t "), "hello world")
         XCTAssertNil(Transcript.normalize(" [BLANK_AUDIO] "))
         XCTAssertNil(Transcript.normalize(" \n "))
+    }
+    func testGlobalPasteDoesNotRequireAnAccessibleEditorOrOriginalFocus() {
+        XCTAssertTrue(DeliveryPolicy.mayPaste(automatic: true, changed: true,
+            sameTarget: false, editable: false, terminal: false, bestEffort: false, global: true))
+        XCTAssertTrue(DeliveryPolicy.mayPaste(automatic: true, changed: false,
+            sameTarget: false, editable: false, terminal: true, bestEffort: false, global: true))
+        XCTAssertFalse(DeliveryPolicy.mayPaste(automatic: false, changed: false,
+            sameTarget: true, editable: true, terminal: false, bestEffort: true, global: true))
     }
     func testStrictTerminalAndKnownChanges() {
         XCTAssertFalse(DeliveryPolicy.mayPaste(automatic: true, changed: false,
