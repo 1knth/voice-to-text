@@ -16,7 +16,7 @@ final class ShortcutRecorderButton: NSButton {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        bezelStyle = .rounded; title = "⌥D"
+        bezelStyle = .rounded; title = Shortcut.display(key: Shortcut.defaultKey, modifiers: Shortcut.defaultModifiers)
         font = .monospacedSystemFont(ofSize: 13, weight: .medium)
         target = self; action = #selector(toggleRecording)
         setAccessibilityLabel("Dictation shortcut")
@@ -189,14 +189,17 @@ private struct SettingsView: View {
                 }
             } footer: { Text("Hold to speak. Release to finish.") }
             Section("Delivery") {
-                Text("⌥D sends Cmd+V to the focused app. ⌥⇧D copies to the clipboard.")
+                Text("Your selected shortcut uses this delivery setting. Typing and pasting go to the app focused when transcription finishes.")
                     .font(.callout)
-                Picker("Other shortcuts", selection: store.binding(\.automaticPaste)) {
-                    Text("Copy to clipboard").tag(false)
-                    Text("Paste automatically").tag(true)
+                Picker("After transcription", selection: store.binding(\.deliveryMode)) {
+                    Text("Type directly").tag(DeliveryMode.type)
+                    Text("Paste via clipboard").tag(DeliveryMode.paste)
+                    Text("Copy to clipboard").tag(DeliveryMode.copy)
                 }
+                .help("Type directly leaves the clipboard untouched; it falls back to copying when secure input is active.")
                 Toggle("Restore previous clipboard", isOn: store.binding(\.preserveClipboard))
                     .help("Best-effort plain-text restoration. Copy Last Transcript remains available.")
+                    .disabled(store.configuration.deliveryMode != .paste)
                 Toggle("Allow terminal paste", isOn: store.binding(\.terminalBestEffort))
                     .help("Terminal tabs and tmux panes cannot be verified. Leave off for strict copy-only behavior.")
             }

@@ -66,17 +66,62 @@ final class DictationTests: XCTestCase {
         XCTAssertFalse(Shortcut.isValid(key: 53, modifiers: 0x100000))
         XCTAssertFalse(Shortcut.isValid(key: 200, modifiers: 0x80000))
     }
-    func testFixedDeliveryShortcuts() {
-        XCTAssertEqual(Shortcut.fixedAction(key: 2, modifiers: 0x80000), .paste)
-        XCTAssertEqual(Shortcut.fixedAction(key: 2, modifiers: 0xA0000), .copy)
-        XCTAssertNil(Shortcut.fixedAction(key: 2, modifiers: 0x180000))
-        XCTAssertNil(Shortcut.fixedAction(key: 5, modifiers: 0x80000))
+    func testRebindingReleasesDefaultShortcuts() {
+        XCTAssertEqual(Shortcut.action(key: 0, modifiers: 0x80000,
+                                       configuredKey: 0, configuredModifiers: 0x80000), .configured)
+        for modifiers: UInt64 in [0x80000, 0xA0000] {
+            XCTAssertNil(Shortcut.action(key: 2, modifiers: modifiers,
+                                         configuredKey: 0, configuredModifiers: 0x80000))
+        }
+        XCTAssertNil(Shortcut.action(key: 0, modifiers: 0xA0000,
+                                     configuredKey: 0, configuredModifiers: 0x80000))
+        XCTAssertEqual(Shortcut.action(key: 2, modifiers: 0x80000,
+                                       configuredKey: 2, configuredModifiers: 0x80000), .configured)
+    }
+    func testDeliverySettingIsIndependentOfShortcut() {
+        for (key, modifiers): (UInt16, UInt64) in [(2, 0x80000), (2, 0xA0000), (5, 0x120000)] {
+            for automatic in [true, false] {
+                var config = Configuration()
+                config.keyCode = key; config.modifiers = modifiers
+                config.automaticPaste = automatic; config.validate()
+                XCTAssertEqual(Shortcut.action(key: key, modifiers: modifiers,
+                    configuredKey: config.keyCode, configuredModifiers: config.modifiers), .configured)
+                XCTAssertEqual(DeliveryPolicy.mayPaste(automatic: config.automaticPaste, changed: true,
+                    sameTarget: false, editable: false, terminal: false, bestEffort: false, global: true), automatic)
+            }
+        }
     }
     func testShortcutConfigurationRoundTrip() throws {
         var config = Configuration(); config.keyCode = 5; config.modifiers = 0x120000
         let restored = try JSONDecoder().decode(Configuration.self, from: JSONEncoder().encode(config))
         XCTAssertEqual(restored.keyCode, 5)
         XCTAssertEqual(restored.modifiers, 0x120000)
+    }
+    func testDirectTypingIsDefaultAndOlderConfigurationsStillLoad() throws {
+        XCTAssertEqual(Configuration().deliveryMode, .type)
+        let legacy = Data(#"{"automaticPaste":true,"keyCode":5,"modifiers":1179648}"#.utf8)
+        let restored = try JSONDecoder().decode(Configuration.self, from: legacy)
+        XCTAssertEqual(restored.keyCode, 5)
+        XCTAssertEqual(restored.deliveryMode, .type)
+        XCTAssertFalse(restored.preserveClipboard)
+    }
+    func testDeliveryModeMapsToSettings() {
+        var config = Configuration()
+        config.deliveryMode = .paste
+        XCTAssertTrue(config.automaticPaste); XCTAssertFalse(config.directTyping)
+        config.deliveryMode = .copy
+        XCTAssertFalse(config.automaticPaste); XCTAssertEqual(config.deliveryMode, .copy)
+        config.deliveryMode = .type
+        XCTAssertTrue(config.automaticPaste); XCTAssertTrue(config.directTyping)
+    }
+    func testTypingChunksRespectLimitAndCharacters() {
+        let text = String(repeating: "a", count: 19) + "👍🏽" + "bc"
+        let chunks = DeliveryPolicy.typingChunks(text, limit: 20)
+        XCTAssertTrue(chunks.allSatisfy { $0.count <= 20 })
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(String(utf16CodeUnits: chunks[1], count: chunks[1].count), "👍🏽bc")
+        XCTAssertEqual(chunks.map { String(utf16CodeUnits: $0, count: $0.count) }.joined(), text)
+        XCTAssertTrue(DeliveryPolicy.typingChunks("").isEmpty)
     }
     func testTranscriptNormalization() {
         XCTAssertEqual(Transcript.normalize(" hello\n world\t "), "hello world")
