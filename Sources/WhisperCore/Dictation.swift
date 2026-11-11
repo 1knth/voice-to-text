@@ -46,7 +46,9 @@ public struct JobGate {
 public struct Configuration: Codable {
     public var cliPath = ""
     public var modelPath = ""
-    public var automaticPaste = false
+    public var automaticPaste = true
+    /// With automatic delivery, type the transcript as keystrokes instead of using the clipboard.
+    public var directTyping = true
     public var preserveClipboard = false
     public var terminalBestEffort = false
     public var showHUD = true
@@ -55,6 +57,29 @@ public struct Configuration: Codable {
     public var keyCode: UInt16 = Shortcut.defaultKey
     public var modifiers: UInt64 = Shortcut.defaultModifiers
     public init() {}
+    /// Missing keys keep their defaults so configurations saved by older builds still load.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) throws -> T {
+            try c.decodeIfPresent(T.self, forKey: key) ?? fallback
+        }
+        let d = Configuration()
+        cliPath = try value(.cliPath, d.cliPath)
+        modelPath = try value(.modelPath, d.modelPath)
+        automaticPaste = try value(.automaticPaste, d.automaticPaste)
+        directTyping = try value(.directTyping, d.directTyping)
+        preserveClipboard = try value(.preserveClipboard, d.preserveClipboard)
+        terminalBestEffort = try value(.terminalBestEffort, d.terminalBestEffort)
+        showHUD = try value(.showHUD, d.showHUD)
+        recordingLimit = try value(.recordingLimit, d.recordingLimit)
+        transcriptionTimeout = try value(.transcriptionTimeout, d.transcriptionTimeout)
+        keyCode = try value(.keyCode, d.keyCode)
+        modifiers = try value(.modifiers, d.modifiers)
+    }
+    public var deliveryMode: DeliveryMode {
+        get { !automaticPaste ? .copy : directTyping ? .type : .paste }
+        set { automaticPaste = newValue != .copy; directTyping = newValue != .paste }
+    }
     public mutating func validate() {
         recordingLimit = recordingLimit.isFinite ? min(60, max(5, recordingLimit)) : 60
         transcriptionTimeout = transcriptionTimeout.isFinite ? min(300, max(10, transcriptionTimeout)) : 120
@@ -73,7 +98,23 @@ public enum Transcript {
     }
 }
 
+public enum DeliveryMode: Hashable {
+    case type, paste, copy
+}
+
 public struct DeliveryPolicy {
+    /// Splits text into keystroke payloads of at most `limit` UTF-16 units,
+    /// never separating the units of one character (emoji, combining marks).
+    public static func typingChunks(_ text: String, limit: Int = 20) -> [[UInt16]] {
+        var chunks: [[UInt16]] = [], chunk: [UInt16] = []
+        for character in text {
+            let units = Array(String(character).utf16)
+            if !chunk.isEmpty && chunk.count + units.count > limit { chunks.append(chunk); chunk = [] }
+            chunk += units
+        }
+        if !chunk.isEmpty { chunks.append(chunk) }
+        return chunks
+    }
     public static func mayPaste(automatic: Bool, changed: Bool, sameTarget: Bool,
                                 editable: Bool, terminal: Bool, bestEffort: Bool, global: Bool = false) -> Bool {
         guard automatic else { return false }

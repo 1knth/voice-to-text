@@ -1,23 +1,21 @@
 import Foundation
 import Carbon
 
-/// Fixed shortcuts choose delivery explicitly; custom shortcuts use Settings.
+/// Delivery actions for the configured shortcut.
 public enum DictationAction {
-    case configured, paste, copy
+    case configured
 }
 
 public enum Shortcut {
     public static let modifierMask: UInt64 = 0x1E0000
     public static let defaultKey: UInt16 = 2 // D
     public static let defaultModifiers: UInt64 = 0x80000 // Option
-    /// Fixed delivery shortcuts override the configurable shortcut's delivery setting.
-    public static func fixedAction(key: UInt16, modifiers: UInt64) -> DictationAction? {
-        guard key == defaultKey else { return nil }
-        switch modifiers & modifierMask {
-        case defaultModifiers: return .paste
-        case defaultModifiers | 0x20000: return .copy // Option–Shift–D
-        default: return nil
-        }
+    /// Only the configured binding may capture keyboard events.
+    public static func action(key: UInt16, modifiers: UInt64,
+                              configuredKey: UInt16, configuredModifiers: UInt64) -> DictationAction? {
+        guard key == configuredKey,
+              modifiers & modifierMask == configuredModifiers & modifierMask else { return nil }
+        return .configured
     }
     public static func isValid(key: UInt16, modifiers: UInt64) -> Bool {
         key <= 126 && (modifiers & modifierMask) != 0

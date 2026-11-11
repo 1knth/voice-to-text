@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import WhisperCore
 
 struct TargetSnapshot {
@@ -90,7 +91,20 @@ struct TargetSnapshot {
 }
 
 final class TargetDelivery {
-    func deliver(_ text: String, config: Configuration, target: TargetSnapshot?, changed: Bool, globalPaste: Bool = false) -> String {
+    private let typingQueue = DispatchQueue(label: "local.whisper.typing", qos: .userInteractive)
+
+    /// Calls `completion` on the main thread with a status message.
+    func deliver(_ text: String, config: Configuration, target: TargetSnapshot?, changed: Bool,
+                 globalPaste: Bool = false, completion: @escaping (String) -> Void) {
+        if let message = deliverImmediately(text, config: config, target: target, changed: changed,
+                                            globalPaste: globalPaste, completion: completion) {
+            completion(message)
+        }
+    }
+
+    /// Returns nil when delivery continues asynchronously and will call `completion` itself.
+    private func deliverImmediately(_ text: String, config: Configuration, target: TargetSnapshot?, changed: Bool,
+                                    globalPaste: Bool, completion: @escaping (String) -> Void) -> String? {
         let trusted = AXIsProcessTrusted()
         let sameTarget = config.automaticPaste && !globalPaste && !changed && trusted
             && target?.matchesCurrent() == true
@@ -99,6 +113,25 @@ final class TargetDelivery {
             terminal: target?.terminal == true, bestEffort: config.terminalBestEffort, global: globalPaste)
             && trusted
         let board = NSPasteboard.general
+        if paste && config.directTyping {
+            // Secure input drops synthetic keys, including Cmd+V, so copy instead.
+            if IsSecureEventInputEnabled() {
+                board.clearContents(); board.setString(text, forType: .string)
+                return "Secure input is active — transcript copied."
+            }
+            // Keystrokes post off the main thread so the HUD keeps animating.
+            typingQueue.async { [self] in
+                let typed = type(text)
+                DispatchQueue.main.async {
+                    guard typed else {
+                        board.clearContents(); board.setString(text, forType: .string)
+                        completion("Typing could not be dispatched — transcript copied."); return
+                    }
+                    completion("Typed into the focused app — review before submitting.")
+                }
+            }
+            return nil
+        }
         let oldText = config.preserveClipboard && paste ? restorableText(from: board) : nil
         board.clearContents()
         guard board.setString(text, forType: .string) else { return "Clipboard write failed. Use Copy Last Transcript to retry." }
@@ -120,6 +153,23 @@ final class TargetDelivery {
         if let oldText { restoreClipboard(oldText, on: board) }
         down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
         return "Paste attempted — review before submitting."
+    }
+
+    /// Posts the text as Unicode keystrokes so the clipboard is never touched.
+    private func type(_ text: String) -> Bool {
+        // A private source keeps physically held modifiers out of the typed text.
+        let source = CGEventSource(stateID: .privateState)
+        for chunk in DeliveryPolicy.typingChunks(text) {
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return false }
+            for event in [down, up] {
+                event.flags = []
+                event.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: chunk)
+            }
+            down.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+            usleep(2_000) // Let the target drain its queue so chunks stay in order.
+        }
+        return true
     }
 
     private func restorableText(from board: NSPasteboard) -> String? {

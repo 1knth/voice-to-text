@@ -41,7 +41,7 @@ private struct StartupMeasurement {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let statusLine = NSMenuItem(title: "Ready", action: nil, keyEquivalent: "")
-    private let resultLine = NSMenuItem(title: "⌥D: paste · ⌥⇧D: copy", action: nil, keyEquivalent: "")
+    private let resultLine = NSMenuItem(title: "Hold your shortcut to dictate", action: nil, keyEquivalent: "")
     private var cancelItem: NSMenuItem!, copyItem: NSMenuItem!
     private let hotkey = HotkeyController()
     private let hud = RecordingHUD()
@@ -56,10 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var directory: URL?
     private var jobFiles: JobFiles?
     private var target: TargetSnapshot?
-    private var targetChanged = false
-    private var jobAction = DictationAction.configured
-    private var monitorsFocus: Bool { jobConfig.automaticPaste && jobAction != .paste }
-    private var maxTimer: Timer?, focusTimer: Timer?, startupTimer: Timer?
+    private var maxTimer: Timer?, startupTimer: Timer?
     private var lastTranscript: String?
     private var observers: [NSObjectProtocol] = []
     private var quitting = false
@@ -145,11 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }
         observers.append(center.addObserver(forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil, queue: .main) { [weak self] _ in
-                guard let self else { return }
+            object: nil, queue: .main) { _ in
                 TargetSnapshot.prepareAccessibility()
-                guard self.gate.phase != .idle else { return }
-                if self.monitorsFocus && !self.targetChanged && self.target?.matchesCurrent() != true { self.targetChanged = true }
             })
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main) { [weak self] _ in self?.hud.position() })
@@ -212,13 +206,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startupMeasurement = StartupMeasurement()
         startupMeasurement?.mark("hotkey-delivered")
         cancelling = false; jobConfig = config
-        jobAction = action
-        switch action {
-        case .paste: jobConfig.automaticPaste = true
-        case .copy: jobConfig.automaticPaste = false
-        case .configured: break
-        }
-        targetChanged = false
         let targetApplication = NSWorkspace.shared.frontmostApplication
         hud.begin(on: nil); refresh()
         startupMeasurement?.mark("hud-requested")
@@ -285,15 +272,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self, self.gate.owns(job), self.gate.phase == .starting else { return }
                 self.cancel(message: "Microphone produced no audio. Check the selected system input.")
             }
-            if monitorsFocus {
-                focusTimer = commonTimer(interval: 0.1, repeats: true) { [weak self] timer in
-                    guard let self else { timer.invalidate(); return }
-                    if self.target?.matchesCurrent() != true {
-                        self.targetChanged = true
-                        timer.invalidate()
-                    }
-                }
-            }
         } catch { cancel(message: error.localizedDescription) }
     }
 
@@ -351,8 +329,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         var settings = jobConfig
         if !held.isEmpty { settings.automaticPaste = false }
-        let message = delivery.deliver(text, config: settings, target: target, changed: targetChanged, globalPaste: jobAction == .paste)
-        finish(message: message)
+        delivery.deliver(text, config: settings, target: target, changed: false,
+                         globalPaste: settings.automaticPaste) { [weak self] message in
+            guard let self, self.gate.owns(job) else { return }
+            self.finish(message: message)
+        }
     }
 
     private func cancel(message: String = "Cancelled.") {
@@ -372,8 +353,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else { finish(message: message) }
     }
     private func finish(message: String) {
-        maxTimer?.invalidate(); focusTimer?.invalidate(); startupTimer?.invalidate()
-        maxTimer = nil; focusTimer = nil; startupTimer = nil
+        maxTimer?.invalidate(); startupTimer?.invalidate()
+        maxTimer = nil; startupTimer = nil
         // Recorder stop completion owns this point; never delete its audio while
         // engine setup or the writer queue may still be using the job directory.
         self.recorder = nil

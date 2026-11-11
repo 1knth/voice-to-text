@@ -12,6 +12,27 @@ private final class TransparentHUDCanvas: NSView {
     override var isOpaque: Bool { false }
 }
 
+/// Vsync-aligned frame callbacks; falls back to a common-mode timer before macOS 14.
+private final class FrameTicker: NSObject {
+    private let tick: () -> Void
+    private var stopLink: (() -> Void)?
+    init(view: NSView, tick: @escaping () -> Void) {
+        self.tick = tick
+        super.init()
+        if #available(macOS 14, *) {
+            let link = view.displayLink(target: self, selector: #selector(fire))
+            link.add(to: .main, forMode: .common)
+            stopLink = { link.invalidate() }
+        } else {
+            let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in self?.fire() }
+            RunLoop.main.add(timer, forMode: .common)
+            stopLink = { timer.invalidate() }
+        }
+    }
+    @objc private func fire() { tick() }
+    func invalidate() { stopLink?(); stopLink = nil }
+}
+
 final class RecordingHUD {
     private let panel: IndicatorPanel
     private let material = NSVisualEffectView()
@@ -22,8 +43,11 @@ final class RecordingHUD {
     private var visibility = HUDVisibility()
     private var level: CGFloat = 0
     private var displayedLevel: CGFloat = 0.015
-    private var displayTimer: Timer?
+    private var ticker: FrameTicker?
     private var previousFrameTime: CFTimeInterval = 0
+    /// Recent levels; outer bars replay older samples so motion ripples outward.
+    private var history: [(time: CFTimeInterval, level: CGFloat)] = []
+    private static let rippleDelay: CFTimeInterval = 0.055
     private static let width: CGFloat = 152
     private static let height: CGFloat = 44
     private static let size = NSSize(width: width, height: height)
@@ -54,7 +78,7 @@ final class RecordingHUD {
         canvas.addSubview(material)
         waveform.wantsLayer = true; waveform.layer?.backgroundColor = NSColor.clear.cgColor
         canvas.addSubview(waveform)
-        ring.frame = NSRect(x: 68, y: 14, width: 16, height: 16)
+        ring.frame = NSRect(x: 67, y: 13, width: 16, height: 16)
         ring.style = .spinning; ring.controlSize = .small
         ring.isDisplayedWhenStopped = false
         material.addSubview(ring)
@@ -75,16 +99,14 @@ final class RecordingHUD {
     }
 
     private func startDisplayUpdates() {
-        guard displayTimer == nil else { return }
-        previousFrameTime = 0
-        displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-            self?.renderLatestLevel()
-        }
+        guard ticker == nil else { return }
+        previousFrameTime = 0; history.removeAll()
+        ticker = FrameTicker(view: waveform) { [weak self] in self?.renderLatestLevel() }
     }
 
     private func stopDisplayUpdates() {
-        displayTimer?.invalidate()
-        displayTimer = nil
+        ticker?.invalidate()
+        ticker = nil
         previousFrameTime = 0
     }
 
@@ -97,8 +119,15 @@ final class RecordingHUD {
         // Exponential response is frame-rate independent: quick attack, relaxed release.
         displayedLevel = CGFloat(whisper_level_step(Double(displayedLevel), Double(target), delta))
         level = displayedLevel
+        history.append((now, level))
+        let horizon = now - Self.rippleDelay * 4
+        if let stale = history.firstIndex(where: { $0.time >= horizon }), stale > 1 { history.removeFirst(stale - 1) }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for (index, bar) in bars.enumerated() { setBar(bar, index: index, level: level) }
+        for (index, bar) in bars.enumerated() {
+            let delayed = now - Self.rippleDelay * CFTimeInterval(abs(index - bars.count / 2))
+            let sample = history.last(where: { $0.time <= delayed })?.level ?? history.first?.level ?? level
+            setBar(bar, index: index, level: sample)
+        }
         CATransaction.commit()
     }
 
@@ -110,7 +139,9 @@ final class RecordingHUD {
         let x = CGFloat(44 + index * 10)
         // Rounded layer bounds avoid rebuilding a CGPath on every display tick.
         let frame = CGRect(x: x, y: Self.height / 2 - halfHeight, width: 5, height: halfHeight * 2)
-        bar.frame = frame
+        // Bounds and position stay valid while the compact morph scales the bar.
+        bar.bounds = CGRect(origin: .zero, size: frame.size)
+        bar.position = CGPoint(x: frame.midX, y: frame.midY)
         bar.cornerRadius = 2.5
     }
 
@@ -149,25 +180,25 @@ final class RecordingHUD {
         guard compact != value else { return }
         compact = value
         let duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.25 : 0
+        // Resizing a window animates in the window server and stutters. The panel
+        // keeps its full size; only layer-backed views inside it morph.
         let width = value ? Self.height : Self.width
-        let origin = panel.frame.origin
-        let frame = NSRect(x: origin.x + (panel.frame.width - width) / 2, y: origin.y,
-                           width: width, height: Self.height)
-        let materialFrame = NSRect(origin: .zero, size: frame.size).insetBy(dx: 1, dy: 1)
-        let radius = Self.height / 2
+        let materialFrame = NSRect(x: (Self.width - width) / 2, y: 0, width: width, height: Self.height)
+            .insetBy(dx: 1, dy: 1)
+        let spring = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0, 1)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(frame, display: true)
+            context.timingFunction = spring
+            context.allowsImplicitAnimation = true
             material.animator().frame = materialFrame
-            material.animator().layer?.cornerRadius = radius
             ring.animator().frame = value
-                ? NSRect(x: 13, y: 13, width: 18, height: 18)
-                : NSRect(x: 68, y: 14, width: 16, height: 16)
+                ? NSRect(x: (width - 18) / 2 - 1, y: 12, width: 18, height: 18)
+                : NSRect(x: 67, y: 13, width: 16, height: 16)
         }
         CATransaction.begin()
-        CATransaction.setAnimationDuration(duration)
-        bars.forEach { $0.opacity = value ? 0 : 1 }
+        CATransaction.setAnimationDuration(duration * 0.6)
+        CATransaction.setAnimationTimingFunction(spring)
+        bars.forEach { $0.opacity = value ? 0 : 1; $0.transform = value ? CATransform3DMakeScale(0.4, 0.4, 1) : CATransform3DIdentity }
         CATransaction.commit()
     }
 
@@ -188,8 +219,10 @@ final class RecordingHUD {
         } ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let frame = screen.visibleFrame
-        let currentWidth = panel.frame.width > 0 ? panel.frame.width : Self.size.width
-        panel.setFrameOrigin(NSPoint(x: frame.midX - currentWidth / 2, y: frame.minY + 24))
+        let origin = NSPoint(x: (frame.midX - Self.width / 2).rounded(), y: frame.minY + 24)
+        // Moving a visible HUD between screens mid-animation reads as a jump.
+        guard panel.frame.origin != origin else { return }
+        panel.setFrameOrigin(origin)
     }
 
     func hide(immediately: Bool = false) {

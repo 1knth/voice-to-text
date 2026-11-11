@@ -7,13 +7,13 @@ final class HotkeyController {
     var onPress: ((DictationAction) -> Void)?
     var onRelease: (() -> Void)?
     var onCancel: (() -> Void)?
-    var keyCode: UInt16 = 2
-    var modifiers: CGEventFlags = [.maskAlternate]
+    var keyCode: UInt16 = Shortcut.defaultKey
+    var modifiers = CGEventFlags(rawValue: Shortcut.defaultModifiers)
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private var held = false
     private var swallowed = false
-    private var activeKeyCode: UInt16 = 2
+    private var activeKeyCode: UInt16 = Shortcut.defaultKey
     private var activeModifiers: CGEventFlags = []
     private static let relevant: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
 
@@ -71,12 +71,12 @@ final class HotkeyController {
         if type == .keyDown {
             if swallowed && code == activeKeyCode { return nil }
             let pressedModifiers = event.flags.intersection(Self.relevant)
-            let delivery = Shortcut.fixedAction(key: code, modifiers: pressedModifiers.rawValue)
-            if delivery != nil || (code == keyCode && pressedModifiers == modifiers) {
+            if let delivery = Shortcut.action(key: code, modifiers: pressedModifiers.rawValue,
+                                               configuredKey: keyCode, configuredModifiers: modifiers.rawValue) {
                 if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                     held = true; swallowed = true
                     activeKeyCode = code; activeModifiers = pressedModifiers
-                    DispatchQueue.main.async { [weak self] in self?.onPress?(delivery ?? .configured) }
+                    DispatchQueue.main.async { [weak self] in self?.onPress?(delivery) }
                 }
                 return nil
             }
